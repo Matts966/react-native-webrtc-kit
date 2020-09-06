@@ -6,6 +6,12 @@ import androidx.annotation.NonNull;
 import android.util.Base64;
 import android.util.Log;
 import android.util.Pair;
+import android.content.Intent;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.WindowManager;
+import android.content.Context;
+import android.app.Activity;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
@@ -16,6 +22,7 @@ import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.module.annotations.ReactModule;
 
 import org.webrtc.AudioSource;
@@ -40,6 +47,11 @@ import org.webrtc.VideoCapturer;
 import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 import org.webrtc.DataChannel;
+import org.webrtc.ScreenCapturerAndroid;
+
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.util.DisplayMetrics;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
@@ -63,7 +75,7 @@ import static jp.shiguredo.react.webrtckit.WebRTCConverter.sessionDescription;
 import static jp.shiguredo.react.webrtckit.WebRTCConverter.toStringList;
 
 @ReactModule(name = "WebRTCModule")
-public class WebRTCModule extends ReactContextBaseJavaModule {
+public class WebRTCModule extends ReactContextBaseJavaModule implements ActivityEventListener {
 
     @NonNull
     private final ReactApplicationContext reactContext;
@@ -84,6 +96,13 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     @NonNull public ReactApplicationContext getReactContext() {
         return reactContext;
     }
+
+    private static Intent mMediaProjectionPermissionResultData;
+    private static int mMediaProjectionPermissionResultCode;
+    private VideoCapturer videoCapturer;
+    private static final int CAPTURE_PERMISSION_REQUEST_CODE = 1;
+    private ReadableMap mConstraintsJson;
+    private Promise mPromise;
 
     public WebRTCModule(@NonNull final ReactApplicationContext reactContext) {
         super(reactContext);
@@ -112,6 +131,8 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
                 .createPeerConnectionFactory();
         this.cameraCapturer = new WebRTCCamera();
         this.surfaceTextureHelper = SurfaceTextureHelper.create("WebRTCCameraCaptureThread", getEglContext());
+
+        reactContext.addActivityEventListener(this);
     }
 
 
@@ -140,6 +161,13 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
          */
         Log.d(getName(), "onCatalystInstanceDestroy()");
         cameraCapturer.stopCapture();
+        try {
+            if (videoCapturer != null) {
+                videoCapturer.stopCapture();
+            }
+        } catch (InterruptedException e) {
+            Log.d(getName(), "InterruptedException");
+        }
 
         // PeerConnection.dispose()を実施するとそのPeerConnectionが内部で持っているすべてのオブジェクトを破棄するので、
         // 同時にSender, Receiver, Streamなども適切に破棄される。
@@ -289,6 +317,124 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         Log.d(getName(), "stopUserMedia()");
         cameraCapturer.stopCapture();
     }
+
+    @ReactMethod
+    public void getDisplayMedia(@Nullable final ReadableMap constraintsJson, @NonNull final Promise promise) {
+        Log.d(getName(), "getDisplayMedia() - constraints=" + constraintsJson);
+
+        try {
+            if (videoCapturer != null) {
+                videoCapturer.stopCapture();
+            }
+        } catch (InterruptedException e) {
+            Log.d(getName(), "InterruptedException");
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            mConstraintsJson = constraintsJson;
+            mPromise = promise;
+            startScreenCapture();
+        } else {
+            internalGetDisplayMedia(constraintsJson, promise);
+        }
+    }
+
+    private void internalGetDisplayMedia(@Nullable final ReadableMap constraintsJson, @NonNull final Promise promise) {
+        Log.d(getName(), "internalGetDisplayMedia");
+
+        final WebRTCMediaStreamConstraints constraints = new WebRTCMediaStreamConstraints(constraintsJson);
+        final boolean isVideoEnabled = (constraints.video != null);
+        final boolean isAudioEnabled = (constraints.audio != null);
+
+        videoCapturer = createScreenCapturer();
+        if (videoCapturer == null) {
+            return;
+        }
+
+        // カメラ用のトラックを持つストリームを生成する
+        // このストリームを管理する必要はなく、
+        // ストリーム ID のみ getUserMedia に渡せればよい
+        final MediaStream mediaStream = peerConnectionFactory.createLocalMediaStream(createNewValueTag());
+
+        // 映像と音声のトラックをストリームに追加する
+        final VideoSource videoSource = peerConnectionFactory.createVideoSource(videoCapturer.isScreencast());
+
+        videoCapturer.initialize(surfaceTextureHelper, reactContext, videoSource.getCapturerObserver());
+        if (isVideoEnabled) {
+            videoCapturer.startCapture(constraints.video.width, constraints.video.height, constraints.video.frameRate);
+        }
+
+        final VideoTrack videoTrack = peerConnectionFactory.createVideoTrack(createNewValueTag(), videoSource);
+        final AudioSource audioSource = peerConnectionFactory.createAudioSource(new MediaConstraints());
+        final AudioTrack audioTrack = peerConnectionFactory.createAudioTrack(createNewValueTag(), audioSource);
+
+        repository.tracks.add(videoTrack.id(), createNewValueTag(), videoTrack);
+        repository.tracks.add(audioTrack.id(), createNewValueTag(), audioTrack);
+        mediaStream.addTrack(videoTrack);
+        mediaStream.addTrack(audioTrack);
+
+        // constraints の指定に従ってトラックの可否を決める
+        videoTrack.setEnabled(isVideoEnabled);
+        audioTrack.setEnabled(isAudioEnabled);
+
+        // JS に処理を戻す
+        final WritableMap result = Arguments.createMap();
+        result.putString("streamId", mediaStream.getId());
+        final WritableArray tracks = Arguments.createArray();
+        tracks.pushMap(mediaStreamTrackJsonValue(videoTrack, repository));
+        tracks.pushMap(mediaStreamTrackJsonValue(audioTrack, repository));
+        result.putArray("tracks", tracks);
+        promise.resolve(result.copy());
+    }
+
+    @ReactMethod
+    public void stopDisplayMedia() {
+        Log.d(getName(), "stopDisplayMedia()");
+        try {
+            if (videoCapturer != null) {
+                videoCapturer.stopCapture();
+            }
+        } catch (InterruptedException e) {
+            Log.d(getName(), "InterruptedException");
+        }
+    }
+
+    private void startScreenCapture() {
+        Log.d(getName(), "startScreenCapture");
+        MediaProjectionManager manager = (MediaProjectionManager) getReactContext().getSystemService(
+                        Context.MEDIA_PROJECTION_SERVICE);
+        Bundle bundle = new Bundle();
+        getReactContext().startActivityForResult(
+                manager.createScreenCaptureIntent(), CAPTURE_PERMISSION_REQUEST_CODE, bundle);
+    }
+ 
+    private VideoCapturer createScreenCapturer() {
+        Log.d(getName(), "createScreenCapturer");
+        if (mMediaProjectionPermissionResultCode != Activity.RESULT_OK) {
+            Log.d(getName(), "User didn't give permission to capture the screen.");
+            return null;
+        }
+        return new ScreenCapturerAndroid(
+            mMediaProjectionPermissionResultData, new MediaProjection.Callback(){
+                @Override
+                public void onStop() {
+                    Log.d(getName(), "MediaProjection stopped.");
+                }
+            });
+    }
+
+    @Override
+    public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
+        Log.d(getName(), "onActivityResult");
+        if (requestCode != CAPTURE_PERMISSION_REQUEST_CODE)
+            return;
+        mMediaProjectionPermissionResultCode = resultCode;
+        mMediaProjectionPermissionResultData = data;
+        internalGetDisplayMedia(mConstraintsJson, mPromise);
+    }
+
+    @Override
+    public void onNewIntent(Intent intent) {}
 
     /**
      * trackSetEnabled(valueTag: ValueTag, enabled: boolean)

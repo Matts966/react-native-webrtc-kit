@@ -27,6 +27,8 @@ export { enableMetrics, getAndResetMetrics, RTCMetricsSampleInfo } from './src/U
 export { getAudioPort, setAudioPort } from './src/MediaDevice/RTCAudioPort';
 export { getUserMedia } from './src/MediaDevice/getUserMedia';
 export { stopUserMedia } from './src/MediaDevice/getUserMedia';
+export { getDisplayMedia } from './src/MediaDevice/getUserMedia';
+export { stopDisplayMedia } from './src/MediaDevice/getUserMedia';
 
 export type { RTCPeerConnectionState } from './src/PeerConnection/RTCPeerConnection';
 export type { RTCSignalingState } from './src/PeerConnection/RTCPeerConnection';

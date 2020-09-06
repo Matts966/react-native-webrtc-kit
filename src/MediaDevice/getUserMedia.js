@@ -26,6 +26,16 @@ export class RTCUserMedia {
     WebRTCModule.stopUserMedia();
   }
 
+  /** @private */
+  static nativeGetDisplayMedia(constraints: RTCMediaStreamConstraints): Promise<Object> {
+    return WebRTCModule.getDisplayMedia(constraints.toJSON());
+  }
+
+  /** @private */
+  static nativeStopDisplayMedia(constraints: RTCMediaStreamConstraints): Promise<Object> {
+    return WebRTCModule.stopDisplayMedia();
+  }
+
   /** 入力トラックのリスト。
    * リストの並びは順不同です。
    */
@@ -107,4 +117,37 @@ export function getUserMedia(constraints: RTCMediaStreamConstraints | null):
 export function stopUserMedia(): void {
   logger.log("# stop user media");
   RTCUserMedia.nativeStopUserMedia();
+}
+
+export function getDisplayMedia(constraints: RTCMediaStreamConstraints | null):
+  Promise<RTCUserMedia> {
+  logger.log("# get display media");
+  if (constraints == null) {
+    constraints = new RTCMediaStreamConstraints();
+  }
+  return RTCUserMedia.nativeGetDisplayMedia(constraints)
+    .then(ev => {
+      var tracks = [];
+      for (const track of ev.tracks) {
+        tracks.push(new RTCMediaStreamTrack(track));
+      }
+      return new RTCUserMedia(tracks, ev.streamId);
+    })
+    .catch(({ message, code }) => {
+      let error;
+      switch (code) {
+        case 'TypeError':
+          error = new TypeError(message);
+          break;
+      }
+      if (!error) {
+        error = new RTCMediaStreamError({ message, name: code });
+      }
+      throw error;
+    });
+}
+
+export function stopDisplayMedia(): void {
+  logger.log("# stop display media");
+  RTCUserMedia.nativeStopDisplayMedia();
 }
